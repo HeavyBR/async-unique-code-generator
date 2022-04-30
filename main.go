@@ -1,7 +1,7 @@
 package main
 
 import (
-	"awesomeProject3/buffer"
+	"async-unique-code-generator/buffer"
 	"flag"
 	"fmt"
 	"log"

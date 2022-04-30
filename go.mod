@@ -1,3 +1,3 @@
-module awesomeProject3
+module async-unique-code-generator
 
 go 1.18
