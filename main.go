@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
+	"math/big"
 	"math/rand"
 	"os"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +19,7 @@ var quantity int64
 var size int
 var prefix string
 var output string
+var isCSV bool
 
 func buildKey(code string) string {
 	return fmt.Sprintf("%s:%s", "prefix", code)
@@ -25,7 +29,7 @@ const (
 	letterBytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
 )
 
-func init() {
+func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	flag.Int64Var(&quantity, "quantity", 10_000, "the quantity of codes that will be generated. E.g: -quantity 10000")
@@ -33,9 +37,23 @@ func init() {
 	flag.StringVar(&prefix, "prefix", "", "select a prefix to each generated code. E.g: -prefix PEPSI")
 	flag.StringVar(&output, "output", "codes.txt", "filename to save the codes. E.g: -output file.txt")
 	flag.Parse()
-}
 
-func main() {
+	var regex, err = regexp.Compile(".csv$")
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	if regex.MatchString(output) {
+		isCSV = true
+	}
+
+	if calculatePossibilities(
+		big.NewInt(int64(len(letterBytes))),
+		big.NewInt(int64(size))).Cmp(big.NewInt(quantity/2)) <= 0 {
+		fmt.Println("cannot safe generate the requested quantity, the combinations will be predictable and/or we will run out of combinations!")
+		return
+	}
+
 	GenerateUniqueCodes(size, quantity, prefix, buildKey)
 }
 
@@ -58,14 +76,17 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 
 	// Buffers
 	var buf = &buffer.Buffer{}
+	if isCSV {
+		fmt.Fprintln(buf, "codes")
+	}
 
 	// Misc
-	var chunkSize = quantity / 100
+	var chunkSize = int64(math.Ceil(float64(quantity) / float64(100)))
 	var sent int64
 
 	wg.Add(1)
 	go func() {
-		var workers = quantity / chunkSize
+		var workers = int64(math.Ceil(float64(quantity) / float64(chunkSize)))
 		for int64(len(created)) < quantity {
 			for i := 0; int64(i) < workers; i++ {
 				go func() {
@@ -84,8 +105,6 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 				select {
 				case code := <-ch:
 					go func(code string) {
-						time.Sleep(10 * time.Millisecond) // Simulate network latency
-
 						// Verify existence
 						m.Lock()
 						if _, ok := memcached[keyBuilder(code)]; ok {
@@ -95,24 +114,24 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 						}
 						m.Unlock()
 
-						time.Sleep(10 * time.Millisecond) // Simulate network latency
 						// Write to cache
 						m.Lock()
 						memcached[keyBuilder(code)] = true
 						m.Unlock()
 
-						time.Sleep(10 * time.Millisecond) // Simulate network latency
 						// Send to topic
 						topic <- code
+
+						// Track successful creations
 						created <- code
 
 						// Write to file
 						fmt.Fprintf(buf, "%s\n", code)
-
 						atomic.AddInt64(&sent, 1)
 					}(code)
 				default:
-					if (sent == (quantity - int64(len(duplicates)))) && len(duplicates) > 0 {
+					if (atomic.LoadInt64(&sent) == ((workers * chunkSize) - int64(len(duplicates)))) && len(duplicates) > 0 {
+						fmt.Println(sent)
 						break loop
 					}
 
@@ -122,25 +141,29 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 				}
 			}
 
-			if int64(len(codes)) < quantity {
-				newQuantity := quantity - int64(len(codes))
-				if newQuantity < chunkSize {
-					chunkSize = newQuantity
+			if atomic.LoadInt64(&sent) < quantity {
+				quantity = quantity - atomic.LoadInt64(&sent)
+				chunkSize = int64(math.Ceil(float64(quantity) / float64(100)))
+				created = make(chan string, quantity)
+				duplicates = make(chan string, quantity)
+				atomic.SwapInt64(&sent, 0)
+				ch = make(chan string, quantity)
+				if quantity < chunkSize {
+					chunkSize = quantity
 					workers = 1
 				} else {
-					workers = newQuantity / chunkSize
+					workers = int64(math.Ceil(float64(quantity) / float64(chunkSize)))
 				}
 			}
 		}
-
 		wg.Done()
 	}()
 
 	wg.Wait()
+	fmt.Println(fmt.Sprintf("%.2f seconds", time.Since(start).Seconds()))
+
 	f, _ := os.Create(output)
 	f.Write(buf.Bytes())
-
-	fmt.Println(fmt.Sprintf("%.2f seconds", time.Since(start).Seconds()))
 }
 
 func SecureRandomString(availableCharBytes string, length int) string {
@@ -186,4 +209,20 @@ func SecureRandomBytes(length int) []byte {
 		log.Fatal("Unable to generate random bytes")
 	}
 	return randomBytes
+}
+
+func calculatePossibilities(n, k *big.Int) (result *big.Int) {
+	nFac := Factorial(n)
+	return nFac.Div(nFac, Factorial(n.Sub(n, k)))
+}
+
+func Factorial(n *big.Int) *big.Int {
+	var result = big.NewInt(1)
+	var i = big.NewInt(n.Int64())
+	for i.Cmp(big.NewInt(0)) != 0 {
+		result.Mul(result, i)
+		i = i.Sub(i, big.NewInt(1))
+	}
+
+	return result
 }
