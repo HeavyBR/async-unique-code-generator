@@ -30,6 +30,7 @@ const (
 )
 
 func main() {
+	var start = time.Now()
 	rand.Seed(time.Now().UnixNano())
 
 	flag.Int64Var(&quantity, "quantity", 10_000, "the quantity of codes that will be generated. E.g: -quantity 10000")
@@ -55,11 +56,11 @@ func main() {
 	}
 
 	GenerateUniqueCodes(size, quantity, prefix, buildKey)
+
+	fmt.Println(fmt.Sprintf("%.2f seconds", time.Since(start).Seconds()))
 }
 
 func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder func(code string) string) {
-	var start = time.Now()
-
 	// Channels
 	var ch = make(chan string, quantity)
 	var created = make(chan string, quantity)
@@ -105,6 +106,8 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 				select {
 				case code := <-ch:
 					go func(code string) {
+						time.Sleep(1 * time.Second) // Simulate network latency
+
 						// Verify existence
 						m.Lock()
 						if _, ok := memcached[keyBuilder(code)]; ok {
@@ -160,7 +163,6 @@ func GenerateUniqueCodes(size int, quantity int64, prefix string, keyBuilder fun
 	}()
 
 	wg.Wait()
-	fmt.Println(fmt.Sprintf("%.2f seconds", time.Since(start).Seconds()))
 
 	f, _ := os.Create(output)
 	f.Write(buf.Bytes())
